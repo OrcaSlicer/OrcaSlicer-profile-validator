@@ -1,0 +1,290 @@
+name: Generate Profile Fixtures
+
+# Manually generate versioned custom-preset fixture ZIPs from each requested
+# OrcaSlicer version's system profiles, using the latest nightly profile
+# validator binary, then publish them to a single long-lived fixture release.
+#
+# This workflow validates/generates only. It never repairs, migrates, or
+# normalizes profile data. A version that cannot be generated is recorded as a
+# failed/skipped result and is NOT added to manifest.json.
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Space-separated OrcaSlicer versions (e.g. "v1.9.0 v1.9.1 v2.0.0")'
+        required: true
+        type: string
+      force_update:
+        description: 'Overwrite existing fixture assets for the requested versions'
+        required: false
+        default: false
+        type: boolean
+      nightly_release:
+        description: 'Nightly release tag that hosts the validator binary'
+        required: false
+        default: 'nightly-builds'
+        type: string
+      validator_asset:
+        description: 'Validator asset name to download from the nightly release'
+        required: false
+        default: 'OrcaSlicer_profile_validator_Linux_Ubuntu2404_nightly'
+        type: string
+      source_repo:
+        description: 'Repo providing system profiles and per-version source archives'
+        required: false
+        default: 'OrcaSlicer/OrcaSlicer'
+        type: string
+      fixture_release:
+        description: 'Long-lived release tag that stores fixture assets'
+        required: false
+        default: 'fixture-archive'
+        type: string
+
+# Serialize runs: they all mutate the single fixture release + manifest.json.
+concurrency:
+  group: fixture-generation
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    # Match the validator asset target (Ubuntu 24.04) so the standalone binary runs.
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout OrcaSlicer-profile-validator
+        uses: actions/checkout@v4
+
+      # jq, zip, unzip, curl, git, and gh are all preinstalled on the
+      # GitHub-hosted ubuntu-24.04 runner image, so no install step is needed.
+
+      - name: Download nightly validator binary
+        run: |
+          set -euo pipefail
+          release="${{ inputs.nightly_release }}"
+          source_repo="${{ inputs.source_repo }}"
+          asset="${{ inputs.validator_asset }}"
+
+          mkdir -p validator
+          # Query and fetch the standalone nightly validator binary.
+          gh release download "$release" -R "$source_repo" -p "$asset" -D validator --clobber
+          chmod +x "validator/$asset"
+
+          # nightly-builds is a moving release, so pin the exact identity used.
+          validator_url="https://github.com/${source_repo}/releases/download/${release}/${asset}"
+          validator_sha="$(sha256sum "validator/$asset" | awk '{print $1}')"
+          echo "VALIDATOR_URL=$validator_url" >> "$GITHUB_ENV"
+          echo "VALIDATOR_SHA=$validator_sha" >> "$GITHUB_ENV"
+
+          echo "Validator: $asset"
+          echo "  url:    $validator_url"
+          echo "  sha256: $validator_sha"
+
+      - name: Ensure fixture release exists and fetch current manifest
+        run: |
+          set -euo pipefail
+          release="${{ inputs.fixture_release }}"
+          repo="$GITHUB_REPOSITORY"
+
+          # Maintain exactly one long-lived release; create it only if missing.
+          if ! gh release view "$release" -R "$repo" >/dev/null 2>&1; then
+            gh release create "$release" -R "$repo" \
+              --title "Fixture Archive" \
+              --notes "Long-lived release storing OrcaSlicer profile fixture assets. Managed by generate_profile_fixtures.yml."
+          fi
+
+          # Start from the existing manifest so entries are added/updated, not lost.
+          if gh release view "$release" -R "$repo" --json assets -q '.assets[].name' \
+              | grep -qx 'manifest.json'; then
+            gh release download "$release" -R "$repo" -p 'manifest.json' --clobber
+          else
+            echo '[]' > manifest.json
+          fi
+
+          # Cache the current asset name list for pre-existing conflict checks.
+          gh release view "$release" -R "$repo" --json assets -q '.assets[].name' \
+            > existing_assets.txt 2>/dev/null || : > existing_assets.txt
+
+      - name: Generate fixtures
+        run: |
+          set -uo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          WORK="$ROOT/_work"; DIST="$ROOT/dist"; LOGS="$ROOT/logs"
+          mkdir -p "$WORK" "$DIST" "$LOGS"
+
+          versions="${{ inputs.versions }}"
+          force="${{ inputs.force_update }}"
+          release="${{ inputs.fixture_release }}"
+          source_repo="${{ inputs.source_repo }}"
+          validator_asset="${{ inputs.validator_asset }}"
+          validator_bin="$ROOT/validator/$validator_asset"
+
+          : > "$ROOT/results.jsonl"
+
+          record() {
+            # record <version> <status> <reason>
+            jq -nc --arg version "$1" --arg status "$2" --arg reason "$3" \
+              '{version:$version, status:$status, reason:$reason}' \
+              >> "$ROOT/results.jsonl"
+          }
+
+          for version in $versions; do
+            echo "::group::Generate $version"
+            asset="orca_custom_presets_${version}.zip"
+            log="validator-generate_${version}.log"
+
+            # Existing fixtures are immutable unless force_update=true.
+            if grep -qx "$asset" "$ROOT/existing_assets.txt" && [ "$force" != "true" ]; then
+              echo "Asset $asset already exists and force_update=false -> skipped"
+              record "$version" "skipped" "asset exists; force_update=false"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Fetch this version's source archive (system profiles come from the
+            # requested tag, NOT from nightly).
+            src_url="https://github.com/${source_repo}/archive/refs/tags/${version}.zip"
+            src_zip="$WORK/src_${version}.zip"
+            if ! curl -fLsS -o "$src_zip" "$src_url"; then
+              echo "Failed to download source archive: $src_url"
+              record "$version" "failed" "source archive download failed: $src_url"
+              echo "::endgroup::"
+              continue
+            fi
+            src_sha="$(sha256sum "$src_zip" | awk '{print $1}')"
+
+            # Extract and locate resources/profiles.
+            src_dir="$WORK/src_${version}"
+            rm -rf "$src_dir"; mkdir -p "$src_dir"
+            unzip -q "$src_zip" -d "$src_dir"
+            profiles_dir="$(find "$src_dir" -maxdepth 4 -type d -path '*/resources/profiles' | head -n1)"
+            if [ -z "$profiles_dir" ]; then
+              echo "resources/profiles not found in source archive for $version"
+              record "$version" "failed" "resources/profiles not found in source archive"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Start from a clean tree: drop any pre-existing user presets.
+            rm -rf "$profiles_dir/user"
+
+            # Generate user presets. Keep the log regardless of outcome.
+            "$validator_bin" -p "$profiles_dir" -g 1 2>&1 | tee "$LOGS/$log"
+            rc=${PIPESTATUS[0]}
+            if [ "$rc" -ne 0 ]; then
+              echo "Validator exited $rc for $version -> no partial fixture created"
+              record "$version" "failed" "validator exit code $rc"
+              echo "::endgroup::"
+              continue
+            fi
+
+            if [ ! -d "$profiles_dir/user" ]; then
+              echo "Validator produced no user/ tree for $version"
+              record "$version" "failed" "no user/ tree generated"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Package the generated user tree for exactly this one version.
+            ( cd "$profiles_dir" && zip -qr "$DIST/$asset" user )
+            cp "$LOGS/$log" "$DIST/$log"
+            asset_sha="$(sha256sum "$DIST/$asset" | awk '{print $1}')"
+            generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            # Add or update this version's manifest entry (replace if present).
+            entry="$(jq -n \
+              --arg version "$version" \
+              --arg asset "$asset" \
+              --arg asset_sha256 "$asset_sha" \
+              --arg source_repo "$source_repo" \
+              --arg source_ref "$version" \
+              --arg source_archive_url "$src_url" \
+              --arg source_archive_sha256 "$src_sha" \
+              --arg workflow_repo "$GITHUB_REPOSITORY" \
+              --arg system_profiles_source "${source_repo}@${version}" \
+              --arg validator_source "latest nightly build" \
+              --arg validator_asset "$validator_asset" \
+              --arg validator_url "$VALIDATOR_URL" \
+              --arg validator_sha256 "$VALIDATOR_SHA" \
+              --arg generated_at "$generated_at" \
+              --arg log_asset "$log" \
+              '{
+                 version: $version,
+                 asset: $asset,
+                 asset_sha256: $asset_sha256,
+                 source_repo: $source_repo,
+                 source_ref: $source_ref,
+                 source_archive_url: $source_archive_url,
+                 source_archive_sha256: $source_archive_sha256,
+                 workflow_repo: $workflow_repo,
+                 system_profiles_source: $system_profiles_source,
+                 validator_source: $validator_source,
+                 validator_asset: $validator_asset,
+                 validator_url: $validator_url,
+                 validator_sha256: $validator_sha256,
+                 validator_args: ["-p", "<profiles>", "-g", "1"],
+                 generated_at: $generated_at,
+                 log_asset: $log_asset
+               }')"
+
+            jq --argjson entry "$entry" \
+              'map(select(.version != $entry.version)) + [$entry] | sort_by(.version)' \
+              "$ROOT/manifest.json" > "$ROOT/manifest.tmp" && mv "$ROOT/manifest.tmp" "$ROOT/manifest.json"
+
+            # Publish this version's asset + log. --clobber handles force_update
+            # (delete + re-upload only this version's asset and log).
+            gh release upload "$release" "$DIST/$asset" "$DIST/$log" \
+              -R "$GITHUB_REPOSITORY" --clobber
+
+            echo "Generated $version -> $asset (sha256 $asset_sha)"
+            record "$version" "generated" ""
+            echo "::endgroup::"
+          done
+
+      - name: Publish manifest
+        run: |
+          set -euo pipefail
+          jq empty manifest.json
+          gh release upload "${{ inputs.fixture_release }}" manifest.json \
+            -R "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload generation logs and results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-generation-logs
+          path: |
+            logs/
+            results.jsonl
+          if-no-files-found: warn
+
+      - name: Summary and status
+        if: always()
+        run: |
+          set -euo pipefail
+          results="$GITHUB_WORKSPACE/results.jsonl"
+          [ -f "$results" ] || : > "$results"
+
+          {
+            echo "## Fixture generation summary"
+            echo ""
+            echo "| version | status | detail |"
+            echo "|---|---|---|"
+            if [ -s "$results" ]; then
+              jq -r '"| \(.version) | \(.status) | \(if .reason == "" then "-" else .reason end) |"' "$results"
+            else
+              echo "| (none) | - | no versions processed |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Fail the workflow if any requested version was skipped or failed.
+          bad="$(jq -rs 'map(select(.status != "generated")) | length' "$results")"
+          if [ "$bad" -gt 0 ]; then
+            echo "::error::$bad requested version(s) were skipped or failed. See summary and fixture-generation-logs artifact."
+            exit 1
+          fi
+          echo "All requested versions generated successfully."
