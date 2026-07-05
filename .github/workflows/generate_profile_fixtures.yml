@@ -5,8 +5,11 @@ name: Generate Profile Fixtures
 # validator binary, then publish them to a single long-lived fixture release.
 #
 # This workflow validates/generates only. It never repairs, migrates, or
-# normalizes profile data. A version that cannot be generated is recorded as a
-# failed/skipped result and is NOT added to manifest.json.
+# normalizes profile data, except that custom presets listed in
+# fixture_exclusions.json (whose parent system preset was removed from main) are
+# pruned from a release's fixture before packaging, so generated derivatives do
+# not dangle when validated against current profiles. A version that cannot be
+# generated is recorded as a failed/skipped result and is NOT added to manifest.json.
 
 on:
   workflow_dispatch:
@@ -132,6 +135,22 @@ jobs:
               >> "$ROOT/results.jsonl"
           }
 
+          # Load the prune list once. Custom presets whose parent system preset was
+          # removed from main are dropped per-release (scoped by "versions") before
+          # packaging, so their generated derivatives do not dangle against current
+          # profiles. Validate up front so a malformed list fails fast.
+          excl_file="$ROOT/fixture_exclusions.json"
+          if [ ! -f "$excl_file" ]; then
+            echo "::error::fixture_exclusions.json not found at $excl_file"; exit 1
+          fi
+          if ! jq empty "$excl_file" 2>/dev/null; then
+            echo "::error::fixture_exclusions.json is not valid JSON"; exit 1
+          fi
+          if ! jq -e 'all(.exclusions[]; (.versions | type) == "array" and (.versions | length) > 0)' \
+              "$excl_file" >/dev/null; then
+            echo "::error::every entry in fixture_exclusions.json needs a non-empty \"versions\" array"; exit 1
+          fi
+
           for version in $versions; do
             echo "::group::Generate $version"
             asset="orca_custom_presets_${version}.zip"
@@ -188,6 +207,25 @@ jobs:
               echo "::endgroup::"
               continue
             fi
+
+            # Drop this release's excluded custom presets (parent removed from main)
+            # before packaging. Exact basename + type match leaves sibling presets
+            # (e.g. the "@HS" variants) untouched; a preset absent from this release
+            # is a no-op. Removes both the .json and its .info sidecar.
+            pruned=0
+            while IFS=$'\t' read -r x_vendor x_type x_name; do
+              [ -z "$x_name" ] && continue
+              x_base="${x_vendor}_${x_name}_orca_test"
+              while IFS= read -r -d '' f; do
+                rm -f -- "$f"
+                echo "  excluded: ${f#"$profiles_dir/"}"
+                pruned=$((pruned + 1))
+              done < <(find "$profiles_dir/user" -type f \
+                        \( -path "*/$x_type/$x_base.json" -o -path "*/$x_type/$x_base.info" \) -print0)
+            done < <(jq -r --arg v "$version" \
+                       '.exclusions[] | select(.versions | index($v)) | [.vendor, .type, .name] | @tsv' \
+                       "$excl_file")
+            echo "$version: pruned $pruned excluded fixture file(s)"
 
             # Package the generated user tree for exactly this one version.
             ( cd "$profiles_dir" && zip -qr "$DIST/$asset" user )

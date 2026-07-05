@@ -1,0 +1,12 @@
+{
+  "_comment": "Custom presets to drop from a release's generated fixture because their parent system preset was removed from OrcaSlicer/OrcaSlicer main. Add an entry whenever you delete a shipping preset that older releases had. 'versions' pins the prune to the releases where the preset is known-invalid, so a future release that re-introduces a valid preset with the same name is left untouched. Applied by generate_profile_fixtures.yml before packaging. See OrcaSlicer PR #14595.",
+  "exclusions": [
+    { "vendor": "Afinia",  "type": "filament", "name": "Afinia ABS",       "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
+    { "vendor": "Afinia",  "type": "filament", "name": "Afinia ABS+",      "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
+    { "vendor": "Afinia",  "type": "filament", "name": "Afinia PLA",        "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
+    { "vendor": "Afinia",  "type": "filament", "name": "Afinia TPU",        "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
+    { "vendor": "Afinia",  "type": "filament", "name": "Afinia Value ABS",  "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
+    { "vendor": "Afinia",  "type": "filament", "name": "Afinia Value PLA",  "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
+    { "vendor": "Comgrow", "type": "process",  "name": "0.20mm Standard @Comgrow T500 1.0", "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] }
+  ]
+}
