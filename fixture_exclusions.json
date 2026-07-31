@@ -7,6 +7,8 @@
     { "vendor": "Afinia",  "type": "filament", "name": "Afinia TPU",        "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
     { "vendor": "Afinia",  "type": "filament", "name": "Afinia Value ABS",  "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
     { "vendor": "Afinia",  "type": "filament", "name": "Afinia Value PLA",  "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
-    { "vendor": "Comgrow", "type": "process",  "name": "0.20mm Standard @Comgrow T500 1.0", "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] }
+    { "vendor": "Comgrow", "type": "process",  "name": "0.20mm Standard @Comgrow T500 1.0", "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1"] },
+    { "vendor": "Snapmaker", "type": "process",  "name": "0.20 Bambu Support W @Snapmaker U1 (0.4 nozzle)", "versions": ["v2.3.1", "v2.3.2", "v2.4.0", "v2.4.1", "v2.4.2"] },
+
   ]
 }
